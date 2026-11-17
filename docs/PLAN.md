@@ -36,7 +36,7 @@ These rules come from Lauren Tan's pstack style. Each one changes a concrete cho
 
 ```text
 Doc: doc_id, path, title, text
-Chunk: chunk_id, doc_id, text
+Chunk: chunk_id, doc_id, doc_name, section_path, page, chunk_index, char_span, text
 Citation: chunk_id, quote
 Sentence: text, citation
 GroundedAnswer: sentences
@@ -44,7 +44,7 @@ Refusal: reason, text
 EvalCase: case_id, question, answerable, expected_chunk_ids, reference_answer
 ```
 
-`reason` is `not_in_docs` or `ungrounded`. `Refusal.text` is always "not in the docs". `doc_id` and `chunk_id` are different strings. A chunk id looks like `open#0`. An unanswerable `EvalCase` has an empty `expected_chunk_ids` list. The HTTP body is flat: `answer`, `citations` as `{chunk_id, quote}` in sentence order, and `reason` of `ok`, `not_in_docs`, or `ungrounded`.
+`reason` is `not_in_docs` or `ungrounded`. `Refusal.text` is always "not in the docs". `doc_id` and `chunk_id` are different strings. A chunk id looks like `open#0`. `doc_name` is the document title. `section_path` is a list of headings. `page` is null for markdown. `char_span` is the start and end of the body in the document text. `text` is the contextual header, a blank line, then the body. An unanswerable `EvalCase` has an empty `expected_chunk_ids` list. The HTTP body is flat: `answer`, `citations` as `{chunk_id, quote}` in sentence order, and `reason` of `ok`, `not_in_docs`, or `ungrounded`.
 
 ## Architecture
 
@@ -67,6 +67,7 @@ flowchart TD
 
 ```text
 docs/PLAN.md
+requirements.txt
 docs/corpus/*.md
 src/__init__.py
 src/types.py
@@ -94,11 +95,13 @@ tests/test_ask.py
 
 ### Chunk size and overlap
 
-**Chosen.** Split each file on H2 headings. If a section is longer than 1600 characters, cut windows of 1600 characters with 320 characters of overlap. 1600 characters is about 400 tokens. 320 is about 80 tokens. A short defect note stays one chunk.
+**Chosen.** Split each file on H1, H2, and H3. Keep numbered steps together. If a section body is at most 2000 characters, it stays one chunk. If it is longer, cut windows of 2000 characters with 200 characters of overlap, on a paragraph or sentence boundary when one exists. 2000 characters is about 500 tokens. 200 is about 50 tokens. The assumption is `CHARS_PER_TOKEN = 4` in `src/config.py`. A short section stays one chunk. Two short sections stay two chunks.
 
-**Why.** A citation should point at one fact. The overlap keeps a sentence that sits on a cut. You count characters, so v1 takes no tokenizer package.
+Every chunk stores `doc_name`, `section_path`, `page` (`None` for markdown), `chunk_index`, and `char_span`. The embedded text starts with a contextual header such as `波峰焊 SOP > 4.3 温度`.
 
-**Alternatives.** Fixed windows with no headings can start in the middle of a step. Semantic splits cut where two sentence embeddings diverge. They add API calls and a second knob. Headings already mark the topics in this short corpus.
+**Why.** A citation should point at one fact, and each heading is one topic. One vector for a whole file mixes those topics, so retrieval gets less precise. 500 tokens is a middle size. A much larger window dilutes the embedding. A much smaller window drops the step around the fact. Overlap of about 10 percent keeps a sentence that sits on a cut. The header puts the title and the section back on a short chunk. You count characters, so v1 takes no tokenizer package.
+
+**Alternatives.** Fixed windows with no headings can start in the middle of a step. Semantic splits cut where two sentence embeddings diverge. They add API calls and a second knob. Headings already mark the topics in this short corpus. An earlier sketch used 1600 characters and 320 of overlap. This milestone uses 2000 and 200.
 
 ### Embedding model
 
@@ -144,13 +147,20 @@ Gates for this small set: recall@4 at least 0.8, citation hit rate at least 0.8,
 
 ### M1. Docs and chunker
 
-Depends on this plan. Files: `docs/corpus/`, `src/__init__.py`, `src/types.py`, `src/config.py`, `src/chunk.py`, `tests/test_chunk.py`. One change: 12 to 16 markdown files, and a chunker that writes `data/chunks.jsonl`.
+Depends on this plan. Files: `docs/corpus/`, `src/__init__.py`, `src/types.py`, `src/config.py`, `src/chunk.py`, `tests/test_chunk.py`, `requirements.txt`, `data/chunks.jsonl`. One change: 3 or 4 sample SOP fixtures, and a chunker that writes `data/chunks.jsonl`.
 
-Write one file per defect class, a rework SOP you invent for a lab, a glossary, and a short note in your own words on how your AOI project uses these class names. You may name IPC-A-600. Do not copy its text, its tables, or any company document.
+The fixtures are lab text, and they read like samples. They are not the defect-class notes. Those notes, including `open.md`, still belong to the later milestones. One fixture uses Chinese headings. One section is long enough to miss the window. One section is a numbered procedure. You may name the six AOI classes. Do not copy IPC-A-600, its tables, or a company document. Open question 4 still stands for a full second-language corpus.
 
-- [ ] Unit. A fixture doc produces stable ids, and overlap text sits in both neighboring chunks.
-- [ ] Live. `python -m src.chunk` prints a count, and every corpus file appears in the output.
-- [ ] Metric. Every chunk is at most 1600 characters. The baseline on trunk is 0 chunks.
+The chunker follows the spec agreed for this milestone.
+
+- Split on H1, H2, and H3. Each heading is its own section. If the section body is at most 2000 characters, it is one chunk. Two short sections stay two chunks.
+- Numbered steps stay together. A step that fits in the window is not cut. A list that fits in its section stays in that one chunk.
+- A longer section uses windows of about 500 tokens with about 50 tokens of overlap. `CHARS_PER_TOKEN` in `src/config.py` is 4, so that is 2000 characters and 200 characters. Cut on a paragraph or a sentence when a boundary exists.
+- Every chunk has `doc_name`, `section_path`, `page` (`None` for markdown), `chunk_index`, and `char_span`. `text` starts with a contextual header: the doc title, ` > `, then the section path. Example: `波峰焊 SOP > 4.3 温度`. The 2000 characters are the section body. The header sits on top, and it is short.
+
+- [x] Unit. A short section is one chunk. An oversized section splits, neighbors share overlap, and a cut lands on a sentence boundary when one exists. Numbered steps that fit are not split. Every chunk has the metadata and the header. The same input produces the same chunks.
+- [x] Live. `python -m src.chunk` prints a chunk count per file and writes `data/chunks.jsonl`.
+- [x] Metric. A section body that fits stays one chunk. A windowed body is at most 2000 characters, with about 200 characters repeated on the cut. The baseline on trunk is 0 chunks.
 
 **Why markdown?** You can diff it, and the chunker splits on headings you can see.
 
@@ -159,6 +169,8 @@ Write one file per defect class, a rework SOP you invent for a lab, a glossary, 
 **What does the overlap change?** A sentence on a cut still appears whole in one chunk, so the quote check can find it.
 
 **Why is a later chunker edit dangerous?** It rewrites chunk ids. M2 replaces the table from the chunk file so old vectors do not linger.
+
+**Why a header?** A short step would embed as an isolated sentence. The header puts the doc title and the section path on the text that will be embedded. The metadata fields sit on every chunk, including the ones where `page` is null.
 
 ### M2. Embed and store
 
