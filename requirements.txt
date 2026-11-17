@@ -1,0 +1,3 @@
+# M1 packages. The plan allows these and no others.
+pydantic>=2.14
+pytest>=8
